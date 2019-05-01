@@ -1,0 +1,16 @@
+target/
+.classpath
+.flattened-pom.xml
+.settings/
+.project
+.vs/
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+*.vcxproj.user
+pom.xml.versionsBackup
+drift-fx-jogl-native/win-x64/*.vcxproj*
+drift-fx-jogl-native/win-x64/*.sln
+drift-fx-jogl-native/win-x64/DriftFX/
+drift-fx-jogl-native/win-x64/lib/
+drift-fx-jogl-native/win-x64/x64/
