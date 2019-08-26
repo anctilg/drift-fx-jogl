@@ -16,7 +16,6 @@
 package dev.anctil.fx.drift.jogl.impl;
 
 import java.util.concurrent.*;
-import java.util.concurrent.locks.*;
 
 import com.sun.javafx.sg.prism.NGNode;
 import com.sun.prism.*;
@@ -39,9 +38,14 @@ public class NGDriftFXSurface extends NGNode
     private int currentFrameDataHash;
     private Texture currentTexture;
 
+    private boolean isActive;
+
     public void present(FrameData frame)
     {
-        currentFrameData = frame;
+        if (frame != null && frame.d3dShareHandle != 0)
+        {
+            currentFrameData = frame;
+        }
     }
 
     public NGDriftFXSurface(long nativeSurfaceId)
@@ -64,54 +68,62 @@ public class NGDriftFXSurface extends NGNode
 
     private Texture createTexture(Graphics g, FrameData data)
     {
-        int w = currentFrameData.width;
-        int h = currentFrameData.height;
+        if (data.d3dShareHandle != 0)
+        {
+            int w = data.width;
+            int h = data.height;
 
-        // create fx texture
-        Texture texture = resourceFactory.createTexture(PixelFormat.BYTE_BGRA_PRE, Texture.Usage.DYNAMIC,
-                Texture.WrapMode.CLAMP_NOT_NEEDED, w, h);
-        if (texture == null)
-        {
-            System.err.println("[J] Allocation of requested texture failed! This is FATAL! requested size was " + w + "x" + h);
-            System.err.flush();
-            return null;
-        }
-        texture.makePermanent();
+            // create fx texture
+            Texture texture = resourceFactory.createTexture(PixelFormat.BYTE_BGRA_PRE, Texture.Usage.DYNAMIC,
+                    Texture.WrapMode.CLAMP_TO_EDGE, w, h);
+            if (texture == null)
+            {
+                System.err.println(
+                        "[J] Allocation of requested texture failed! This is FATAL! requested size was " + w + "x" + h);
+                System.err.flush();
+                return null;
+            }
+            texture.makePermanent();
 
-        // to protect the javafx gl context we change threads here
-        ReentrantLock lock = new ReentrantLock();
-        Condition done = lock.newCondition();
-        lock.lock();
-        fixer.execute(() -> {
-            lock.lock();
-            GraphicsPipelineUtil.onTextureCreated(texture, currentFrameData);
-            done.signal();
-            lock.unlock();
-        });
-        try
-        {
-            done.await();
-        }
-        catch (InterruptedException e)
-        {
-            e.printStackTrace();
-        }
+            // recreate shared texture
+            // to protect the javafx gl context we change threads here
+            int[] createTextureResult = new int[] { -1 };
+            CountDownLatch latch = new CountDownLatch(1);
+            fixer.execute(() -> {
+                try
+                {
+                    createTextureResult[0] = GraphicsPipelineUtil.onTextureCreated(texture, data);
+                }
+                catch (Throwable t)
+                {
+                    System.err.println("[J] Crash while creating D3D texture: " + t.getMessage());
+                }
+                finally
+                {
+                    latch.countDown();
+                }
+            });
+            try
+            {
+                latch.await();
+            }
+            catch (InterruptedException e)
+            {
+            }
 
-        // recreate shared texture
-        // int result = GraphicsPipelineUtil.onTextureCreated(texture,
-        // currentFrameData);
-        int result = 0;
+            int result = createTextureResult[0];
+            if (result == 0)
+            {
+                return texture;
+            }
+            else
+            {
+                texture.dispose();
+                return null;
+            }
 
-        if (result == 0)
-        {
-            return texture;
         }
-        else
-        {
-            System.err.println("Result was " + result);
-            texture.dispose();
-            return null;
-        }
+        return null;
     }
 
     static Executor fixer = Executors.newSingleThreadExecutor(new ThreadFactory()
@@ -155,18 +167,26 @@ public class NGDriftFXSurface extends NGNode
             }
         }
 
-        if (currentTexture != null)
+        if (currentTexture != null && isActive)
         {
+            int lX = 0;
+            int lY = 0;
             int textureWidth = currentTexture.getContentWidth();
             int textureHeight = currentTexture.getContentHeight();
-
+            int targetWidth = textureWidth;
+            int targetHeight = textureHeight;
+            if (lHeight != targetHeight || lWidth != targetWidth)
+            {
+                double targetRatio = lHeight != 0 ? lWidth / (double) lHeight : 1.0;
+                targetHeight = textureHeight;
+                targetWidth = (int) Math.ceil(targetHeight * targetRatio);
+                lX = (textureWidth - targetWidth) / 2;
+                lY = (textureHeight - targetHeight) / 2;
+            }
             Log.debug("[Info ] Surface# " + nativeSurfaceHandle + ": Drawing texture "
-                    + GraphicsPipelineUtil.getTextureHandle(currentTexture));
-
-            // System.err.println("## " + textureWidth + "x" + textureHeight + " -> " + x +
-            // ", " + y + " @ " + finalWidth + "x" + finalHeight);
-            g.drawTexture(currentTexture, 0, lHeight, lWidth, 0, 0, 0, textureWidth, textureHeight);
-
+                    + GraphicsPipelineUtil.getTextureHandle(currentTexture) + " ["
+                    + System.identityHashCode(currentTexture) + "]");
+            g.drawTexture(currentTexture, 0, lHeight, lWidth, 0, lX, lY, targetWidth + lX, targetHeight + lY);
         }
         else
         {
@@ -176,7 +196,6 @@ public class NGDriftFXSurface extends NGNode
 
     public void updateSize(float width, float height)
     {
-        System.out.println("[J] NativeSurface updateSize " + width + " " + height);
         if (width != -1)
         {
             this.width = width;
@@ -185,13 +204,18 @@ public class NGDriftFXSurface extends NGNode
         {
             this.height = height;
         }
-        CompletableFuture.runAsync(() -> NativeAPI.updateSize(nativeSurfaceHandle, getWidth(), getHeight()));
+        fixer.execute(() -> NativeAPI.updateSize(nativeSurfaceHandle, getWidth(), getHeight()));
     }
 
     @Override
     protected boolean hasOverlappingContents()
     {
         return false;
+    }
+
+    public void setActive(boolean isActive)
+    {
+        this.isActive = isActive;
     }
 
 }

@@ -4,14 +4,14 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>dev.anctil.drift-fx</groupId>
 	<artifactId>drift-fx-jogl-parent</artifactId>
-	<version>0.5.0</version>
+	<version>0.5.3</version>
 	<name>Drift-FX-JOGL</name>
 	<description>A modified implementation of the drift-fx project for easier use with the jogl library</description>
 	<packaging>pom</packaging>
 
 	<modules>
 		<module>drift-fx-jogl-jfx8</module>
-		<module>drift-fx-jogl-jfx11</module>
+		<!-- <module>drift-fx-jogl-jfx11</module> -->
 		<module>drift-fx-jogl-native</module>
 		<module>drift-fx-jogl</module>
 	</modules>

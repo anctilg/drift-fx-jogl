@@ -13,7 +13,12 @@ package dev.anctil.fx.drift.jogl;
 import java.lang.ref.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+
+import javafx.application.Platform;
+import javafx.beans.property.*;
+import javafx.scene.Node;
 
 import com.jogamp.opengl.*;
 import com.sun.javafx.geom.*;
@@ -25,18 +30,22 @@ import com.sun.javafx.tk.Toolkit;
 
 import dev.anctil.fx.drift.jogl.impl.NGDriftFXSurface;
 import dev.anctil.fx.drift.jogl.internal.*;
-import javafx.application.Platform;
-import javafx.beans.property.*;
-import javafx.scene.Node;
+import dev.anctil.fx.drift.jogl.internal.JNINativeSurface.FrameData;
 
 // Note: this implementation is against internal JavafX API
 @SuppressWarnings({ "restriction", "deprecation" })
 public class DriftFXSurface extends Node
 {
+    /** The delay before a resize operation is actually handled and JOGL drawable is asked to resize, removing redraws and creation/deletion of surfaces while resizing */
+    private static final int RESIZE_DELAY_MS = 60;
+    /** Load and initialize pipeline only once */
+    private static boolean initialized = false;
     private JOGLTransferCallback transferCallback;
     private boolean isActive;
     private Executor glExecutor = new PrivateExecutorService();
     private final DriftFXSurfaceNativeResource nativeResource;
+    /** The ms timestamp at which a resize operation should be handled */
+    private long resizeWaitTimestamp;
 
     public DriftFXSurface()
     {
@@ -102,7 +111,11 @@ public class DriftFXSurface extends Node
     {
         if (isActive != active)
         {
+            impl_geomChanged();
+            impl_layoutBoundsChanged();
             impl_markDirty(DirtyBits.NODE_GEOMETRY);
+            impl_markDirty(DirtyBits.NODE_CONTENTS);
+            resizeWaitTimestamp = 0;
         }
         isActive = active;
     }
@@ -181,6 +194,7 @@ public class DriftFXSurface extends Node
             impl_layoutBoundsChanged();
             impl_geomChanged();
             impl_markDirty(DirtyBits.NODE_GEOMETRY);
+            setResizeWaitTimestamp();
         }
     }
 
@@ -248,6 +262,7 @@ public class DriftFXSurface extends Node
             impl_geomChanged();
             impl_layoutBoundsChanged();
             impl_markDirty(DirtyBits.NODE_GEOMETRY);
+            setResizeWaitTimestamp();
         }
     }
 
@@ -306,8 +321,6 @@ public class DriftFXSurface extends Node
         }
     }
 
-    private static boolean initialized = false;
-
     public static synchronized void initialize()
     {
         if (initialized)
@@ -351,23 +364,32 @@ public class DriftFXSurface extends Node
         super.impl_updatePeer();
         NGDriftFXSurface peer = impl_getPeer();
 
-        if (impl_isDirty(DirtyBits.NODE_GEOMETRY))
+        peer.setActive(isActive);
+        if (isResizing())
         {
-            peer.updateSize((float) getWidth(), (float) getHeight());
             peer.markDirty();
-            glExecutor.execute(() -> {
-                if (nativeResource.canvas != null)
-                {
-                    nativeResource.canvas.setSurfaceSize((int) getWidth(), (int) getHeight());
-                }
-            });
+            peer.updateSize((float) getWidth(), (float) getHeight());
+            Platform.runLater(() -> impl_markDirty(DirtyBits.NODE_GEOMETRY));
+            Toolkit.getToolkit().requestNextPulse();
+        }
+        else
+        {
+            if (impl_isDirty(DirtyBits.NODE_GEOMETRY))
+            {
+                peer.markDirty();
+                glExecutor.execute(() -> {
+                    if (nativeResource.canvas != null)
+                    {
+                        nativeResource.canvas.setSurfaceSize((int) getWidth(), (int) getHeight());
+                    }
+                });
+            }
         }
 
         if (impl_isDirty(DirtyBits.NODE_CONTENTS))
         {
             peer.markDirty();
         }
-
     }
 
     /**
@@ -384,29 +406,49 @@ public class DriftFXSurface extends Node
         return true;
     }
 
+    private void setResizeWaitTimestamp()
+    {
+        resizeWaitTimestamp = System.currentTimeMillis() + RESIZE_DELAY_MS;
+    }
+
+    private boolean isResizing()
+    {
+        return System.currentTimeMillis() < resizeWaitTimestamp;
+    }
+
     @Override
     public void resize(double width, double height)
     {
         setWidth(width);
         setHeight(height);
         impl_markDirty(DirtyBits.NODE_GEOMETRY);
+        setResizeWaitTimestamp();
     }
 
-    public void dirty()
+    private void dirty()
     {
         impl_markDirty(DirtyBits.NODE_CONTENTS);
+        Toolkit.getToolkit().requestNextPulse();
     }
 
     private static Consumer<JNINativeSurface.FrameData> mCreateFramePresenter(DriftFXSurface pSurface)
     {
+        AtomicReference<JNINativeSurface.FrameData> lCurrentFrame = new AtomicReference<>();
         WeakReference<DriftFXSurface> surfaceRef = new WeakReference<>(pSurface);
         return (frame) -> {
             DriftFXSurface surface = surfaceRef.get();
-            if (surface != null)
+            if (surface != null && frame.width > 0 && frame.height > 0)
             {
-                NGDriftFXSurface ngSurface = surface.impl_getPeer();
-                ngSurface.present(frame);
-                surface.impl_markDirty(DirtyBits.NODE_CONTENTS);
+                JNINativeSurface.FrameData lOldData = lCurrentFrame.getAndSet(frame);
+                if (lOldData == null)
+                {
+                    Platform.runLater(() -> {
+                        FrameData lFrame = lCurrentFrame.getAndSet(null);
+                        NGDriftFXSurface ngSurface = surface.impl_getPeer();
+                        ngSurface.present(lFrame);
+                        surface.impl_markDirty(DirtyBits.NODE_CONTENTS);
+                    });
+                }
             }
         };
     }
@@ -461,6 +503,7 @@ public class DriftFXSurface extends Node
                 drawable.getGL().glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, frameBuffer);
                 surf.transferCallback.render(drawable.getGL().getGL2ES3(), width, height);
                 drawable.getGL().glFlush();
+                Platform.runLater(surf::dirty);
             }
         }
 
@@ -488,7 +531,7 @@ public class DriftFXSurface extends Node
         {
             this.drawable = drawable;
             DriftFXSurface surface = surfaceRef.get();
-            if (surface != null && surface.isActive)
+            if (surface != null && surface.isActive && !surface.isResizing())
             {
                 if (drawable.getSurfaceWidth() != surfaceWidth || drawable.getSurfaceHeight() != surfaceHeight)
                 {
@@ -498,7 +541,6 @@ public class DriftFXSurface extends Node
                 if (nativeSurfaceId >= 0)
                 {
                     NativeAPI.render(nativeSurfaceId, this::render);
-                    Platform.runLater(surface::dirty);
                 }
             }
         }

@@ -17,9 +17,9 @@ package dev.anctil.fx.drift.jogl.internal;
 
 import java.lang.reflect.*;
 
-import dev.anctil.fx.drift.jogl.internal.JNINativeSurface.FrameData;
-
 import com.sun.prism.*;
+
+import dev.anctil.fx.drift.jogl.internal.JNINativeSurface.FrameData;
 
 public class GraphicsPipelineUtil
 {
@@ -130,7 +130,8 @@ public class GraphicsPipelineUtil
     {
         if (isD3D())
         {
-            return NativeAPI.d3dRecreateTextureAsShared(texture, currentFrameData.d3dShareHandle);
+            int lD3dRecreateTextureAsShared = NativeAPI.d3dRecreateTextureAsShared(texture, currentFrameData.d3dShareHandle);
+            return lD3dRecreateTextureAsShared;
         }
         return -1;
     }
